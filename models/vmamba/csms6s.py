@@ -135,3 +135,86 @@ def selective_scan_fn(u, delta, A, B, C, D=None, delta_bias=None,
     fn = (selective_scan_torch if backend == "torch" or (not WITH_CUDA)
           else SelectiveScanCuda.apply)
     return fn(u, delta, A, B, C, D, delta_bias, delta_softplus, oflex, backend)
+
+
+# ---------------------------------------------------------------------------
+# ADDED LOCALLY (not upstream): parallel prefix scan.
+#
+# WHY
+# selective_scan_torch runs a Python loop over all L timesteps, each launching
+# several small kernels, and autograd then backprops through an L-deep unrolled
+# graph. It is kernel-launch-bound, not FLOP-bound. Measured on an A100-80GB
+# at L=64: 172 img/s fwd+bwd, i.e. ~4.4 min/epoch, ~22 GPU-hours for three
+# seeds. Not viable.
+#
+# THE OBSERVATION
+# The recurrence is
+#     x_t = a_t * x_{t-1} + b_t
+# a first-order linear recurrence with DIAGONAL transition. Each step is the
+# affine map  x -> a*x + b, and composing two such maps gives another one:
+#     (a1,b1) then (a2,b2)  ==  x -> (a2*a1) x + (a2*b1 + b2)
+# Composition is associative, so the sequence can be evaluated with a parallel
+# prefix scan in ceil(log2(L)) rounds instead of L sequential steps. At L=64
+# that is 6 rounds rather than 64.
+#
+# This is the same mathematics evaluated in a different order -- identical
+# parameters, identical output up to float associativity. Verified against
+# selective_scan_torch in tests/test_scan_equivalence.py.
+#
+# Uses more activation memory than the sequential version (each round saves
+# two tensors for backward), which is why it is opt-in via config.
+# ---------------------------------------------------------------------------
+
+def selective_scan_parallel(
+    u: torch.Tensor,        # (B, K * C, L)
+    delta: torch.Tensor,    # (B, K * C, L)
+    A: torch.Tensor,        # (K * C, N)
+    B: torch.Tensor,        # (B, K, N, L)
+    C: torch.Tensor,        # (B, K, N, L)
+    D: torch.Tensor = None,
+    delta_bias: torch.Tensor = None,
+    delta_softplus=True,
+    oflex=True,
+    *args,
+    **kwargs
+):
+    dtype_in = u.dtype
+    Batch, K, N, L = B.shape
+    KCdim = u.shape[1]
+    Cdim = int(KCdim / K)
+    assert u.shape == (Batch, KCdim, L)
+    assert delta.shape == (Batch, KCdim, L)
+    assert A.shape == (KCdim, N)
+    assert C.shape == B.shape
+
+    if delta_bias is not None:
+        delta = delta + delta_bias[..., None]
+    if delta_softplus:
+        delta = torch.nn.functional.softplus(delta)
+
+    u, delta, A, B, C = u.float(), delta.float(), A.float(), B.float(), C.float()
+    B = B.view(Batch, K, 1, N, L).repeat(1, 1, Cdim, 1, 1).view(Batch, KCdim, N, L)
+    C = C.view(Batch, K, 1, N, L).repeat(1, 1, Cdim, 1, 1).view(Batch, KCdim, N, L)
+    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+
+    # Hillis-Steele inclusive scan over the L axis (dim 2).
+    # Invariant after round d: (a_t, b_t) is the composed affine map from
+    # x_{t-2^d} to x_t. The initial state is zero (matching the reference's
+    # A.new_zeros), so once the maps span the whole prefix, b_t == x_t.
+    a, b = deltaA, deltaB_u
+    step = 1
+    while step < L:
+        # shift right along L. The first `step` positions have no predecessor,
+        # so they compose with the IDENTITY map (a=1, b=0) -- hence value=1
+        # for a and value=0 for b. Padding a with 0 instead would silently
+        # zero the leading states.
+        a_prev = torch.nn.functional.pad(a, (0, 0, step, 0), value=1.0)[:, :, :L]
+        b_prev = torch.nn.functional.pad(b, (0, 0, step, 0), value=0.0)[:, :, :L]
+        b = a * b_prev + b      # must use the OLD a
+        a = a * a_prev
+        step *= 2
+
+    y = torch.einsum('bdln,bdnl->bdl', b, C)
+    out = y if D is None else y + u * D.unsqueeze(-1)
+    return out if oflex else out.to(dtype=dtype_in)

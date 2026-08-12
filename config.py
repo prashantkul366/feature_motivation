@@ -56,8 +56,22 @@ VSS = dict(
     ssm_drop_rate=0.0,
     mlp_drop_rate=0.0,
     post_norm=False,             # pre-norm, matching ViT
-    force_torch_scan=True,       # bypass Triton: at 8x8 the kernel uses 32x32
-                                 # blocks, 64 valid lanes of 1024
+    force_torch_scan=True,       # bypass Triton for cross_scan/cross_merge: at
+                                 # 8x8 the kernel uses 32x32 blocks, 64 valid
+                                 # lanes of 1024. NOTE this controls the CROSS
+                                 # SCAN only, not the selective scan below.
+
+    # Selective-scan implementation. MUST be set explicitly, because csms6s
+    # auto-selects: merely pip-installing mamba_ssm into the session flips
+    # this from the torch reference to a CUDA kernel with no change to this
+    # repo, and nothing would look wrong. Run check_scan_backends.py first
+    # and record whichever you pin here in the paper.
+    #   "auto"     - csms6s decides (CUDA if importable, else torch)
+    #   "torch"    - selective_scan_torch, the reference. ~172 img/s.
+    #   "parallel" - prefix scan, verified equivalent to the reference at
+    #                3e-7 relative on both forward and gradients
+    #   "cuda"     - force the mamba_ssm kernel
+    selective_scan_impl="auto",
 )
 
 KAN = dict(
