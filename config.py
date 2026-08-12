@@ -25,7 +25,7 @@ PATCH_SIZE = 4                   # -> 8x8 grid = 64 tokens
 N_TOKENS = 64
 GRID = 8
 EMBED_DIM = 192
-DEPTH = 3                        # blocks per model
+DEPTH = 6                       # blocks per model
 NUM_CLASSES = 100
 IN_CHANS = 3
 
