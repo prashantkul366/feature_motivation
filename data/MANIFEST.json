@@ -1,0 +1,15 @@
+{
+  "cifar100_train_size": 50000,
+  "split_seed": 0,
+  "n_train": 45000,
+  "n_val": 5000,
+  "n_analysis": 2000,
+  "numpy_generator": "PCG64 via np.random.default_rng",
+  "sha256": {
+    "split_indices.npz": "8896f9b5e709f77133c4a599f3d4e72702134085c79645e0fafd7c6d48c0c8ed",
+    "analysis_indices.npy": "b5a08512598b2e36b6522761adbb5b2e3ea25e39c2a036b5c9caf92fbe8a842a",
+    "token_pair_indices.npy": "e6c856a4b116bd891a9fa43f78db856a68b852d0f0b73e0bec687935bea2b6d4"
+  },
+  "n_token_pairs": 2000,
+  "n_tokens": 64
+}
